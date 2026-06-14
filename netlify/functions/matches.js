@@ -42,7 +42,12 @@ exports.handler = async function (event, context) {
     // 2. Fetch real-time scores from WorldCup26 API
     let liveData = [];
     try {
-        const response = await fetch('https://worldcup26.ir/get/games');
+        // Use a timeout to prevent the whole function from hanging
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 4000);
+        const response = await fetch('https://worldcup26.ir/get/games', { signal: controller.signal });
+        clearTimeout(timeoutId);
+        
         if (response.ok) {
             const json = await response.json();
             liveData = json.games || [];
@@ -53,17 +58,22 @@ exports.handler = async function (event, context) {
 
     // 3. Merge the data
     const formattedMatches = (dbMatches || []).map((dbMatch) => {
-      // Find matching game in live API by team names
-      const liveGame = liveData.find(g => 
-        (g.home_team_name_en === dbMatch.home_team.name || g.home_team_name_en.includes(dbMatch.home_team.name)) &&
-        (g.away_team_name_en === dbMatch.away_team.name || g.away_team_name_en.includes(dbMatch.away_team.name))
-      );
+      // Find matching game in live API with safety checks
+      const liveGame = liveData.find(g => {
+        const homeName = dbMatch.home_team?.name?.toLowerCase();
+        const awayName = dbMatch.away_team?.name?.toLowerCase();
+        const apiHome = (g.home_team_name_en || "").toLowerCase();
+        const apiAway = (g.away_team_name_en || "").toLowerCase();
+
+        return (apiHome === homeName || apiHome.includes(homeName)) &&
+               (apiAway === awayName || apiAway.includes(awayName));
+      });
 
       // Default to database values
-      let status = dbMatch.status_short;
-      let elapsed = dbMatch.status_elapsed;
-      let homeGoals = dbMatch.home_goals;
-      let awayGoals = dbMatch.away_goals;
+      let status = dbMatch.status_short || 'NS';
+      let elapsed = dbMatch.status_elapsed || '';
+      let homeGoals = dbMatch.home_goals || 0;
+      let awayGoals = dbMatch.away_goals || 0;
 
       // If live data found, override with real scores and status
       if (liveGame) {
@@ -71,10 +81,10 @@ exports.handler = async function (event, context) {
               status = 'FT';
           } else if (liveGame.time_elapsed === 'live' || liveGame.time_elapsed === 'half-time') {
               status = 'LIVE';
-              elapsed = liveGame.time_elapsed === 'half-time' ? 'HT' : '';
+              elapsed = liveGame.time_elapsed === 'half-time' ? 'HT' : (liveGame.time_elapsed || '');
           }
-          homeGoals = liveGame.home_score || 0;
-          awayGoals = liveGame.away_score || 0;
+          homeGoals = liveGame.home_score !== undefined ? liveGame.home_score : homeGoals;
+          awayGoals = liveGame.away_score !== undefined ? liveGame.away_score : awayGoals;
       }
 
       return {
@@ -96,6 +106,11 @@ exports.handler = async function (event, context) {
       body: JSON.stringify({ date: targetDate, matches: formattedMatches }),
     };
   } catch (err) {
-    return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
+    console.error('API Error:', err);
+    return { 
+      statusCode: 500, 
+      headers, 
+      body: JSON.stringify({ error: "Server Error: " + err.message }) 
+    };
   }
 };
