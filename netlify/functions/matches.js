@@ -11,7 +11,7 @@ exports.handler = async function (event, context) {
     'Content-Type': 'application/json',
   };
 
-  if (event.httpMethod === 'OPTIONS') {
+  if (event.httpMethod === 'OPTIONS' ) {
     return { statusCode: 200, headers, body: '' };
   }
 
@@ -19,72 +19,54 @@ exports.handler = async function (event, context) {
     const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     const params = event.queryStringParameters || {};
     
-    let targetDate = params.date; 
-    if (!targetDate) {
-      targetDate = new Date().toISOString().split('T')[0];
-    }
+    let targetDate = params.date || new Date().toISOString().split('T')[0];
 
-    // 1. Fetch matches from your Supabase database
-    let query = supabase
+    // 1. Fetch matches from your Supabase
+    const { data: dbMatches, error } = await supabase
       .from('matches')
       .select(`
         id, match_date, local_date, status_short, status_elapsed,
-        home_goals, away_goals, stream_url, is_favorite,
-        home_team:teams!matches_home_team_id_fkey (id, name, logo_url),
-        away_team:teams!matches_away_team_id_fkey (id, name, logo_url)
+        home_goals, away_goals, stream_url,
+        home_team:teams!matches_home_team_id_fkey (name),
+        away_team:teams!matches_away_team_id_fkey (name)
       `)
       .eq('local_date', targetDate)
       .order('match_date', { ascending: true });
 
-    const { data: dbMatches, error } = await query;
     if (error) throw error;
 
-    // 2. Fetch real-time scores from WorldCup26 API
+    // 2. Fetch real-time scores
     let liveData = [];
     try {
-        // Use a timeout to prevent the whole function from hanging
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 4000);
-        const response = await fetch('https://worldcup26.ir/get/games', { signal: controller.signal });
-        clearTimeout(timeoutId);
-        
+        const response = await fetch('https://worldcup26.ir/get/games' );
         if (response.ok) {
             const json = await response.json();
             liveData = json.games || [];
         }
-    } catch (e) {
-        console.error('Failed to fetch live scores:', e);
-    }
+    } catch (e) {}
 
-    // 3. Merge the data
+    // 3. Smart Merge Logic
     const formattedMatches = (dbMatches || []).map((dbMatch) => {
-      // Find matching game in live API with safety checks
-      const liveGame = liveData.find(g => {
-        const homeName = dbMatch.home_team?.name?.toLowerCase();
-        const awayName = dbMatch.away_team?.name?.toLowerCase();
-        const apiHome = (g.home_team_name_en || "").toLowerCase();
-        const apiAway = (g.away_team_name_en || "").toLowerCase();
+      const liveGame = liveData.find(g => 
+        (g.home_team_name_en || "").toLowerCase().includes(dbMatch.home_team.name.toLowerCase()) &&
+        (g.away_team_name_en || "").toLowerCase().includes(dbMatch.away_team.name.toLowerCase())
+      );
 
-        return (apiHome === homeName || apiHome.includes(homeName)) &&
-               (apiAway === awayName || apiAway.includes(awayName));
-      });
-
-      // Default to database values
       let status = dbMatch.status_short || 'NS';
       let elapsed = dbMatch.status_elapsed || '';
       let homeGoals = dbMatch.home_goals || 0;
       let awayGoals = dbMatch.away_goals || 0;
 
-      // If live data found, override with real scores and status
       if (liveGame) {
+          // SUPER-DETECTION: If not finished and not "notstarted", it's LIVE!
           if (liveGame.finished === "TRUE") {
               status = 'FT';
-          } else if (liveGame.time_elapsed === 'live' || liveGame.time_elapsed === 'half-time') {
+          } else if (liveGame.time_elapsed && liveGame.time_elapsed.toLowerCase() !== 'notstarted') {
               status = 'LIVE';
-              elapsed = liveGame.time_elapsed === 'half-time' ? 'HT' : (liveGame.time_elapsed || '');
+              elapsed = liveGame.time_elapsed === 'half-time' ? 'HT' : (liveGame.time_elapsed === 'live' ? '' : liveGame.time_elapsed);
           }
-          homeGoals = liveGame.home_score !== undefined ? liveGame.home_score : homeGoals;
-          awayGoals = liveGame.away_score !== undefined ? liveGame.away_score : awayGoals;
+          homeGoals = liveGame.home_score ?? homeGoals;
+          awayGoals = liveGame.away_score ?? awayGoals;
       }
 
       return {
@@ -92,25 +74,22 @@ exports.handler = async function (event, context) {
         date: dbMatch.match_date,
         status: { short: status, elapsed: elapsed },
         teams: {
-          home: { name: dbMatch.home_team?.name, logo: dbMatch.home_team?.logo_url },
-          away: { name: dbMatch.away_team?.name, logo: dbMatch.away_team?.logo_url },
+          home: { name: dbMatch.home_team.name, logo: `https://flagsapi.com/${getCountryCode(dbMatch.home_team.name )}/flat/64.png` }, // Fallback logo logic
+          away: { name: dbMatch.away_team.name, logo: `https://flagsapi.com/${getCountryCode(dbMatch.away_team.name )}/flat/64.png` }
         },
         goals: { home: homeGoals, away: awayGoals },
         stream_url: dbMatch.stream_url,
       };
     });
 
-    return {
-      statusCode: 200,
-      headers,
-      body: JSON.stringify({ date: targetDate, matches: formattedMatches }),
-    };
+    return { statusCode: 200, headers, body: JSON.stringify({ date: targetDate, matches: formattedMatches }) };
   } catch (err) {
-    console.error('API Error:', err);
-    return { 
-      statusCode: 500, 
-      headers, 
-      body: JSON.stringify({ error: "Server Error: " + err.message }) 
-    };
+    return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
   }
 };
+
+// Helper to keep logos working even if database has issues
+function getCountryCode(name) {
+    const codes = {'Mexico':'MX','South Africa':'ZA','South Korea':'KR','Czech Republic':'CZ','Canada':'CA','Bosnia':'BA','USA':'US','Paraguay':'PY','Haiti':'HT','Scotland':'GB-SCT','Australia':'AU','Turkey':'TR','Brazil':'BR','Morocco':'MA','Qatar':'QA','Switzerland':'CH','Ivory Coast':'CI','Ecuador':'EC','Germany':'DE','Curaçao':'CW','Netherlands':'NL','Japan':'JP','Sweden':'SE','Tunisia':'TN','Iran':'IR','New Zealand':'NZ','Spain':'ES','Cape Verde':'CV','Belgium':'BE','Egypt':'EG','Saudi Arabia':'SA','Uruguay':'UY','France':'FR','Senegal':'SN','Italy':'IT','DR Congo':'CD'};
+    return codes[name] || 'UN';
+}
