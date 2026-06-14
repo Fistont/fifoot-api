@@ -11,7 +11,7 @@ exports.handler = async function (event, context) {
     'Content-Type': 'application/json',
   };
 
-  if (event.httpMethod === 'OPTIONS' ) {
+  if (event.httpMethod === 'OPTIONS') {
     return { statusCode: 200, headers, body: '' };
   }
 
@@ -19,13 +19,12 @@ exports.handler = async function (event, context) {
     const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     const params = event.queryStringParameters || {};
     
-    // 1. Get the target date (Default to today)
     let targetDate = params.date; 
     if (!targetDate) {
       targetDate = new Date().toISOString().split('T')[0];
     }
 
-    // 2. Fetch matches from your Supabase database
+    // 1. Fetch matches from your Supabase database
     let query = supabase
       .from('matches')
       .select(`
@@ -40,40 +39,48 @@ exports.handler = async function (event, context) {
     const { data: dbMatches, error } = await query;
     if (error) throw error;
 
-    // 3. Fetch live scores from streamed.pk API
-    let liveScores = [];
+    // 2. Fetch real-time scores from WorldCup26 API
+    let liveData = [];
     try {
-        const response = await fetch('https://streamed.pk/api/matches/live' );
+        const response = await fetch('https://worldcup26.ir/get/games');
         if (response.ok) {
-            liveScores = await response.json();
+            const json = await response.json();
+            liveData = json.games || [];
         }
     } catch (e) {
         console.error('Failed to fetch live scores:', e);
     }
 
-    // 4. Merge the data
+    // 3. Merge the data
     const formattedMatches = (dbMatches || []).map((dbMatch) => {
-      // Find a matching game in the live API by team names
-      const liveMatch = liveScores.find(ls => 
-        ls.category === 'football' && 
-        (ls.title.toLowerCase().includes(dbMatch.home_team.name.toLowerCase()) || 
-         ls.title.toLowerCase().includes(dbMatch.away_team.name.toLowerCase()))
+      // Find matching game in live API by team names
+      const liveGame = liveData.find(g => 
+        (g.home_team_name_en === dbMatch.home_team.name || g.home_team_name_en.includes(dbMatch.home_team.name)) &&
+        (g.away_team_name_en === dbMatch.away_team.name || g.away_team_name_en.includes(dbMatch.away_team.name))
       );
 
       // Default to database values
       let status = dbMatch.status_short;
+      let elapsed = dbMatch.status_elapsed;
       let homeGoals = dbMatch.home_goals;
       let awayGoals = dbMatch.away_goals;
 
-      // If live data found on streamed.pk, set status to LIVE
-      if (liveMatch) {
-          status = 'LIVE';
+      // If live data found, override with real scores and status
+      if (liveGame) {
+          if (liveGame.finished === "TRUE") {
+              status = 'FT';
+          } else if (liveGame.time_elapsed === 'live' || liveGame.time_elapsed === 'half-time') {
+              status = 'LIVE';
+              elapsed = liveGame.time_elapsed === 'half-time' ? 'HT' : '';
+          }
+          homeGoals = liveGame.home_score || 0;
+          awayGoals = liveGame.away_score || 0;
       }
 
       return {
         id: dbMatch.id,
         date: dbMatch.match_date,
-        status: { short: status, elapsed: dbMatch.status_elapsed },
+        status: { short: status, elapsed: elapsed },
         teams: {
           home: { name: dbMatch.home_team?.name, logo: dbMatch.home_team?.logo_url },
           away: { name: dbMatch.away_team?.name, logo: dbMatch.away_team?.logo_url },
