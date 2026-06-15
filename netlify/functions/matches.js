@@ -18,9 +18,25 @@ exports.handler = async function (event, context) {
   try {
     const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     const params = event.queryStringParameters || {};
-    let targetDate = params.date || new Date().toISOString().split('T')[0];
+    
+    // FIX: Use the user's local date (e.g., CDT) instead of UTC
+    // We can default to the date in a specific timezone if not provided
+    let targetDate = params.date;
+    if (!targetDate) {
+        // Calculate the date in CDT (UTC-5)
+        // Since we are in June, it might be CDT (UTC-5) or CST (UTC-6)
+        // We use a robust way to get the date in America/Chicago timezone
+        const now = new Date();
+        const formatter = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'America/Chicago',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit'
+        });
+        targetDate = formatter.format(now); // Returns YYYY-MM-DD
+    }
 
-    // 1. Fetch matches and team details (including logos) from Supabase
+    // 1. Fetch matches and team details from Supabase
     const { data: dbMatches, error } = await supabase
       .from('matches')
       .select(`
@@ -34,7 +50,7 @@ exports.handler = async function (event, context) {
 
     if (error) throw error;
 
-    // 2. Fetch live data from the external API for status and scores
+    // 2. Fetch live data from the external API
     let liveData = [];
     try {
       const response = await fetch('https://worldcup26.ir/get/games');
@@ -64,13 +80,11 @@ exports.handler = async function (event, context) {
         normalize(g.away_team_name_en).includes(dbAway)
       );
 
-      // Default to database values
       let status = dbMatch.status_short || 'NS';
       let elapsed = dbMatch.status_elapsed || '';
       let homeGoals = dbMatch.home_goals ?? 0;
       let awayGoals = dbMatch.away_goals ?? 0;
 
-      // Override with live API data if available
       if (liveGame) {
         if (liveGame.finished === "TRUE") {
           status = 'FT';
@@ -91,11 +105,11 @@ exports.handler = async function (event, context) {
         teams: {
           home: { 
             name: dbMatch.home_team?.name || 'Unknown', 
-            logo: dbMatch.home_team?.logo_url || '' // Flags strictly from DB
+            logo: dbMatch.home_team?.logo_url || '' 
           },
           away: { 
             name: dbMatch.away_team?.name || 'Unknown', 
-            logo: dbMatch.away_team?.logo_url || '' // Flags strictly from DB
+            logo: dbMatch.away_team?.logo_url || '' 
           }
         },
         goals: { home: homeGoals, away: awayGoals },
