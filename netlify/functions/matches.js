@@ -1,98 +1,143 @@
-<div class="widget-matches-container">
-    <div class="widget-matches-header">
-        <h2 class="widget-matches-title">Today Match</h2>
-        <p id="widget-date-display" style="text-align:center;color:#888;margin-top:5px;"></p>
-    </div>
-    <div class="date-nav-bar">
-        <button class="date-nav-btn" onclick="fifoot.changeDay(-1)">&#8249; Prev</button>
-        <span class="date-nav-label" id="date-nav-label">Today</span>
-        <button class="date-nav-btn" onclick="fifoot.changeDay(1)">Next &#8250;</button>
-    </div>
-    <div class="matches-grid" id="matches-grid">
-        <p style="text-align:center;color:#777;padding:20px;">Loading matches...</p>
-    </div>
-</div>
-<script>
-(function(){
-    const API_URL='https://heartfelt-bavarois-6e8726.netlify.app/api/matches';
+const { createClient } = require('@supabase/supabase-js');
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+
+exports.handler = async function (event, context) {
+  const headers = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Content-Type': 'application/json',
+  };
+
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 200, headers, body: '' };
+  }
+
+  try {
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+        throw new Error("Missing Supabase configuration");
+    }
+
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    const params = event.queryStringParameters || {};
     
-    const getLocalDate = (d) => {
-        const year = d.getFullYear();
-        const month = String(d.getMonth() + 1).padStart(2, '0');
-        const day = String(d.getDate()).padStart(2, '0');
-        return `${year}-${month}-${day}`;
-    };
+    // Timezone Fix: America/Chicago (CDT)
+    const now = new Date();
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Chicago',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+    });
+    const todayCDT = formatter.format(now);
+    let targetDate = params.date || todayCDT;
 
-    const fifoot={
-        date:new Date(),
-        formatDate:d=>getLocalDate(d),
-        changeDay:n=>{
-            fifoot.date.setDate(fifoot.date.getDate()+n);
-            fifoot.render();
-        },
-        getStatus:(s,e)=>{
-            if(['LIVE','1H','2H','ET','PEN'].includes(s))return{text:`LIVE ${e||''}'`,cls:'status-live'};
-            if(s==='HT')return{text:'HALF TIME',cls:'status-live'};
-            if(['FT','AET'].includes(s))return{text:'FINISHED',cls:'status-ft'};
-            return{text:'UPCOMING',cls:'status-ns'};
-        },
-        render:()=>{
-            const ds=fifoot.formatDate(fifoot.date);
-            const today = getLocalDate(new Date());
-            document.getElementById('date-nav-label').textContent = (ds === today) ? 'Today' : ds;
+    // 1. Fetch from Supabase
+    const { data: dbMatches, error } = await supabase
+      .from('matches')
+      .select(`
+        id, match_date, local_date, status_short, status_elapsed,
+        home_goals, away_goals, stream_url,
+        home_team:teams!matches_home_team_id_fkey (name, logo_url),
+        away_team:teams!matches_away_team_id_fkey (name, logo_url)
+      `)
+      .eq('local_date', targetDate)
+      .order('match_date', { ascending: true });
+
+    if (error) throw error;
+
+    const isFastMode = params.fast === 'true';
+    let liveData = [];
+
+    // Only fetch live data if NOT in fast mode
+    if (!isFastMode) {
+        try {
+            // Add a timeout to the fetch to prevent hanging
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 4000);
             
-            // STAGE 1: Instant Load from DB (fast=true)
-            fifoot.fetchMatches(ds, true).then(() => {
-                // STAGE 2: Background Update with Live Status (fast=false)
-                fifoot.fetchMatches(ds, false);
-            });
-        },
-        fetchMatches:(dateStr, isFast)=>{
-            return fetch(`${API_URL}?date=${dateStr}${isFast ? '&fast=true' : ''}`)
-                .then(r=>r.json())
-                .then(data=>{
-                    const grid=document.getElementById('matches-grid');
-                    // Only clear grid if it's the fast initial load or if matches changed
-                    if(isFast || grid.innerHTML.includes('No matches')) {
-                        grid.innerHTML=data.matches.length?'':`<p style="grid-column:1/-1;text-align:center;padding:40px;color:#999;">No matches scheduled for this date.</p>`;
-                    }
-                    
-                    data.matches.forEach(m=>{
-                        const status=fifoot.getStatus(m.status.short,m.status.elapsed);
-                        const time=new Date(m.date).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-                        
-                        let card = document.querySelector(`[data-match-id="${m.id}"]`);
-                        if(!card) {
-                            card = document.createElement('div');
-                            card.className = 'match-card';
-                            card.setAttribute('data-match-id', m.id);
-                            grid.appendChild(card);
-                        }
+            const response = await fetch('https://worldcup26.ir/get/games', { signal: controller.signal });
+            clearTimeout(timeoutId);
 
-                        card.innerHTML=`
-                            <div class="teams-display">
-                                <div class="team-info"><img src="${m.teams.home.logo}" class="team-logo"><div class="team-name">${m.teams.home.name}</div></div>
-                                <div class="vs-area">
-                                    <div class="score-box">${m.status.short==='NS'?'VS':m.goals.home+'-'+m.goals.away}</div>
-                                    <div class="match-time">${time}</div>
-                                    <div class="status-badge ${status.cls}">${status.text}</div>
-                                </div>
-                                <div class="team-info"><img src="${m.teams.away.logo}" class="team-logo"><div class="team-name">${m.teams.away.name}</div></div>
-                            </div>
-                            <a href="${m.stream_url}" target="_blank" class="stream-button ${m.status.short==='FT'?'ended':''}">
-                                ${m.status.short==='FT'?'MATCH ENDED':'WATCH STREAM'}
-                            </a>`;
-                    });
-                }).catch(err=>console.error('Fetch error:', err));
+            if (response.ok) {
+                const json = await response.json();
+                liveData = json.games || [];
+            }
+        } catch (e) {
+            console.error('Live API fetch skipped or failed:', e.message);
         }
-    };
-    window.fifoot=fifoot;
-    fifoot.render();
+    }
 
-    setInterval(() => {
-        const ds=fifoot.formatDate(fifoot.date);
-        const today = getLocalDate(new Date());
-        if(ds === today) { fifoot.fetchMatches(ds, false); }
-    }, 60000);
-})();
-</script>
+    const formattedMatches = (dbMatches || []).map((dbMatch) => {
+      const normalize = (name) => {
+          let n = (name || "").toLowerCase();
+          if (n.includes("ivory coast") || n.includes("cote d'ivoire") || n.includes("côte d'ivoire")) return "ivory coast";
+          if (n.includes("dr congo") || n.includes("congo dr")) return "dr congo";
+          if (n.includes("usa") || n.includes("united states")) return "usa";
+          return n;
+      };
+
+      const dbHome = normalize(dbMatch.home_team?.name);
+      const dbAway = normalize(dbMatch.away_team?.name);
+
+      const liveGame = liveData.find(g => 
+        normalize(g.home_team_name_en).includes(dbHome) &&
+        normalize(g.away_team_name_en).includes(dbAway)
+      );
+
+      // RESTORED original logic
+      let status = dbMatch.status_short || 'NS';
+      let elapsed = dbMatch.status_elapsed || '';
+      let homeGoals = dbMatch.home_goals || 0;
+      let awayGoals = dbMatch.away_goals || 0;
+
+      if (liveGame) {
+          if (liveGame.finished === "TRUE") {
+              status = 'FT';
+          } else if (liveGame.time_elapsed && liveGame.time_elapsed.toLowerCase() !== 'notstarted') {
+              status = 'LIVE';
+              elapsed = liveGame.time_elapsed === 'half-time' ? 'HT' : (liveGame.time_elapsed === 'live' ? '' : liveGame.time_elapsed);
+          }
+          homeGoals = liveGame.home_score ?? homeGoals;
+          awayGoals = liveGame.away_score ?? awayGoals;
+      }
+
+      return {
+        id: dbMatch.id,
+        date: dbMatch.match_date,
+        status: { short: status, elapsed: elapsed },
+        teams: {
+          home: { 
+            name: dbMatch.home_team?.name || 'Unknown', 
+            logo: dbMatch.home_team?.logo_url || '' 
+          },
+          away: { 
+            name: dbMatch.away_team?.name || 'Unknown', 
+            logo: dbMatch.away_team?.logo_url || '' 
+          }
+        },
+        goals: { home: homeGoals, away: awayGoals },
+        stream_url: dbMatch.stream_url,
+      };
+    });
+
+    return { 
+        statusCode: 200, 
+        headers, 
+        body: JSON.stringify({ 
+            date: targetDate, 
+            matches: formattedMatches,
+            is_fast: isFastMode 
+        }) 
+    };
+  } catch (err) {
+    console.error('Handler Error:', err.message);
+    return { 
+        statusCode: 500, 
+        headers, 
+        body: JSON.stringify({ error: err.message, matches: [] }) 
+    };
+  }
+};
