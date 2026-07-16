@@ -50,23 +50,30 @@ exports.handler = async function (event, context) {
 
     const isFastMode = params.fast === 'true';
     let liveData = [];
+    let streamedPkMatches = [];
 
     // Only fetch live data if NOT in fast mode
     if (!isFastMode) {
         try {
-            // Add a timeout to the fetch to prevent hanging
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 4000);
             
-            const response = await fetch('https://worldcup26.ir/get/games', { signal: controller.signal });
-            clearTimeout(timeoutId);
-
-            if (response.ok) {
-                const json = await response.json();
+            // Fetch Scores
+            const scoreResponse = await fetch('https://worldcup26.ir/get/games', { signal: controller.signal });
+            if (scoreResponse.ok) {
+                const json = await scoreResponse.json();
                 liveData = json.games || [];
             }
+
+            // NEW: Fetch Streams from streamed.pk
+            const streamResponse = await fetch('https://streamed.pk/api/matches/all-today', { signal: controller.signal });
+            if (streamResponse.ok) {
+                streamedPkMatches = await streamResponse.json();
+            }
+
+            clearTimeout(timeoutId);
         } catch (e) {
-            console.error('Live API fetch skipped or failed:', e.message);
+            console.error('Live APIs fetch failed:', e.message);
         }
     }
 
@@ -82,16 +89,23 @@ exports.handler = async function (event, context) {
       const dbHome = normalize(dbMatch.home_team?.name);
       const dbAway = normalize(dbMatch.away_team?.name);
 
+      // Match for Scores
       const liveGame = liveData.find(g => 
         normalize(g.home_team_name_en).includes(dbHome) &&
         normalize(g.away_team_name_en).includes(dbAway)
       );
 
-      // RESTORED original logic
+      // NEW: Match for Streams
+      const streamGame = streamedPkMatches.find(g => 
+        (normalize(g.teams?.home?.name || "").includes(dbHome) || dbHome.includes(normalize(g.teams?.home?.name || ""))) &&
+        (normalize(g.teams?.away?.name || "").includes(dbAway) || dbAway.includes(normalize(g.teams?.away?.name || "")))
+      );
+
       let status = dbMatch.status_short || 'NS';
       let elapsed = dbMatch.status_elapsed || '';
       let homeGoals = dbMatch.home_goals || 0;
       let awayGoals = dbMatch.away_goals || 0;
+      let autoStream = null;
 
       if (liveGame) {
           if (liveGame.finished === "TRUE") {
@@ -102,6 +116,14 @@ exports.handler = async function (event, context) {
           }
           homeGoals = liveGame.home_score ?? homeGoals;
           awayGoals = liveGame.away_score ?? awayGoals;
+      }
+
+      // NEW: Set Auto Stream Data
+      if (streamGame && streamGame.sources && streamGame.sources.length > 0) {
+          autoStream = {
+              source: streamGame.sources[0].source,
+              id: streamGame.sources[0].id
+          };
       }
 
       return {
@@ -120,6 +142,7 @@ exports.handler = async function (event, context) {
         },
         goals: { home: homeGoals, away: awayGoals },
         stream_url: dbMatch.stream_url,
+        auto_stream: autoStream
       };
     });
 
