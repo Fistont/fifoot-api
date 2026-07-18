@@ -11,7 +11,7 @@ exports.handler = async function (event, context) {
     'Content-Type': 'application/json',
   };
 
-  if (event.httpMethod === 'OPTIONS' ) {
+  if (event.httpMethod === 'OPTIONS') {
     return { statusCode: 200, headers, body: '' };
   }
 
@@ -44,7 +44,7 @@ exports.handler = async function (event, context) {
     // 2. Fetch Streams from streamed.pk
     let streamedPkMatches = [];
     try {
-        const streamResponse = await fetch('https://streamed.pk/api/matches/all-today' );
+        const streamResponse = await fetch('https://streamed.pk/api/matches/all-today');
         if (streamResponse.ok) {
             streamedPkMatches = await streamResponse.json();
         }
@@ -54,7 +54,8 @@ exports.handler = async function (event, context) {
 
     const formattedMatches = (dbMatches || []).map((dbMatch) => {
       const normalize = (name) => {
-          let n = (name || "").toLowerCase();
+          if (!name) return "";
+          let n = name.toLowerCase();
           if (n.includes("ivory coast") || n.includes("cote d'ivoire")) return "ivory coast";
           if (n.includes("dr congo") || n.includes("congo dr")) return "dr congo";
           if (n.includes("usa") || n.includes("united states")) return "usa";
@@ -64,20 +65,29 @@ exports.handler = async function (event, context) {
       const dbHome = normalize(dbMatch.home_team?.name);
       const dbAway = normalize(dbMatch.away_team?.name);
 
-      // AGGRESSIVE MATCHING: Find the stream ID
+      // BULLETPROOF MATCHING: Only match football category and World Cup matches
       const streamGame = streamedPkMatches.find(g => {
+          // Only look at football matches
+          if (g.category !== 'football') return false;
+          
           const sHome = normalize(g.teams?.home?.name || "");
           const sAway = normalize(g.teams?.away?.name || "");
           const sTitle = normalize(g.title || "");
-          return (sHome.includes(dbHome) || dbHome.includes(sHome) || sTitle.includes(dbHome)) &&
-                 (sAway.includes(dbAway) || dbAway.includes(sAway) || sTitle.includes(dbAway));
+          
+          // Check if both teams match
+          const homeMatch = sHome.includes(dbHome) || dbHome.includes(sHome) || sTitle.includes(dbHome);
+          const awayMatch = sAway.includes(dbAway) || dbAway.includes(sAway) || sTitle.includes(dbAway);
+          
+          return homeMatch && awayMatch;
       });
 
       let autoStream = null;
       if (streamGame && streamGame.sources && streamGame.sources.length > 0) {
+          // Prefer non-admin sources (they usually have better streams)
+          const bestSource = streamGame.sources.find(s => s.source !== 'admin') || streamGame.sources[0];
           autoStream = {
-              source: streamGame.sources[0].source,
-              id: streamGame.sources[0].id
+              source: bestSource.source,
+              id: bestSource.id
           };
       }
 
@@ -97,6 +107,7 @@ exports.handler = async function (event, context) {
 
     return { statusCode: 200, headers, body: JSON.stringify({ date: targetDate, matches: formattedMatches }) };
   } catch (err) {
+    console.error('Handler Error:', err.message);
     return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
   }
 };
