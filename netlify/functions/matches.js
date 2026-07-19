@@ -16,13 +16,20 @@ exports.handler = async function (event, context) {
   }
 
   try {
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+        throw new Error("Missing Supabase configuration");
+    }
+
     const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     const params = event.queryStringParameters || {};
     
+    // Timezone Fix: America/Chicago (CDT)
     const now = new Date();
     const formatter = new Intl.DateTimeFormat('en-CA', {
         timeZone: 'America/Chicago',
-        year: 'numeric', month: '2-digit', day: '2-digit'
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
     });
     const todayCDT = formatter.format(now);
     let targetDate = params.date || todayCDT;
@@ -41,67 +48,119 @@ exports.handler = async function (event, context) {
 
     if (error) throw error;
 
-    // 2. Fetch Streams from streamed.pk
+    const isFastMode = params.fast === 'true';
+    let liveData = [];
     let streamedPkMatches = [];
-    try {
-        const streamResponse = await fetch('https://streamed.pk/api/matches/all-today');
-        if (streamResponse.ok) {
-            streamedPkMatches = await streamResponse.json();
+
+    // Only fetch live data if NOT in fast mode
+    if (!isFastMode) {
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 4000);
+            
+            // Fetch Scores
+            const scoreResponse = await fetch('https://worldcup26.ir/get/games', { signal: controller.signal });
+            if (scoreResponse.ok) {
+                const json = await scoreResponse.json();
+                liveData = json.games || [];
+            }
+
+            // NEW: Fetch Streams from streamed.pk
+            const streamResponse = await fetch('https://streamed.pk/api/matches/all-today', { signal: controller.signal });
+            if (streamResponse.ok) {
+                streamedPkMatches = await streamResponse.json();
+            }
+
+            clearTimeout(timeoutId);
+        } catch (e) {
+            console.error('Live APIs fetch failed:', e.message);
         }
-    } catch (e) {
-        console.error('Streamed.pk fetch failed:', e.message);
     }
 
     const formattedMatches = (dbMatches || []).map((dbMatch) => {
       const normalize = (name) => {
-          if (!name) return "";
-          return name.toLowerCase().replace(/[^a-z0-9]/g, ''); // Remove all non-alphanumeric
+          let n = (name || "").toLowerCase();
+          if (n.includes("ivory coast") || n.includes("cote d'ivoire") || n.includes("côte d'ivoire")) return "ivory coast";
+          if (n.includes("dr congo") || n.includes("congo dr")) return "dr congo";
+          if (n.includes("usa") || n.includes("united states")) return "usa";
+          return n;
       };
 
       const dbHome = normalize(dbMatch.home_team?.name);
       const dbAway = normalize(dbMatch.away_team?.name);
 
-      // FUZZY MATCHING
-      const streamGame = streamedPkMatches.find(g => {
-          if (g.category !== 'football') return false;
-          
-          const sHome = normalize(g.teams?.home?.name || "");
-          const sAway = normalize(g.teams?.away?.name || "");
-          const sTitle = normalize(g.title || "");
-          
-          // Check if both team names are found anywhere in the stream data
-          const homeFound = sHome.includes(dbHome) || dbHome.includes(sHome) || sTitle.includes(dbHome);
-          const awayFound = sAway.includes(dbAway) || dbAway.includes(sAway) || sTitle.includes(dbAway);
-          
-          return homeFound && awayFound;
-      });
+      // Match for Scores
+      const liveGame = liveData.find(g => 
+        normalize(g.home_team_name_en).includes(dbHome) &&
+        normalize(g.away_team_name_en).includes(dbAway)
+      );
 
+      // NEW: Match for Streams
+      const streamGame = streamedPkMatches.find(g => 
+        (normalize(g.teams?.home?.name || "").includes(dbHome) || dbHome.includes(normalize(g.teams?.home?.name || ""))) &&
+        (normalize(g.teams?.away?.name || "").includes(dbAway) || dbAway.includes(normalize(g.teams?.away?.name || "")))
+      );
+
+      let status = dbMatch.status_short || 'NS';
+      let elapsed = dbMatch.status_elapsed || '';
+      let homeGoals = dbMatch.home_goals || 0;
+      let awayGoals = dbMatch.away_goals || 0;
       let autoStream = null;
+
+      if (liveGame) {
+          if (liveGame.finished === "TRUE") {
+              status = 'FT';
+          } else if (liveGame.time_elapsed && liveGame.time_elapsed.toLowerCase() !== 'notstarted') {
+              status = 'LIVE';
+              elapsed = liveGame.time_elapsed === 'half-time' ? 'HT' : (liveGame.time_elapsed === 'live' ? '' : liveGame.time_elapsed);
+          }
+          homeGoals = liveGame.home_score ?? homeGoals;
+          awayGoals = liveGame.away_score ?? awayGoals;
+      }
+
+      // NEW: Set Auto Stream Data
       if (streamGame && streamGame.sources && streamGame.sources.length > 0) {
-          const bestSource = streamGame.sources.find(s => s.source !== 'admin') || streamGame.sources[0];
           autoStream = {
-              source: bestSource.source,
-              id: bestSource.id
+              source: streamGame.sources[0].source,
+              id: streamGame.sources[0].id
           };
       }
 
       return {
         id: dbMatch.id,
         date: dbMatch.match_date,
-        status: { short: dbMatch.status_short, elapsed: dbMatch.status_elapsed },
+        status: { short: status, elapsed: elapsed },
         teams: {
-          home: { name: dbMatch.home_team?.name, logo: dbMatch.home_team?.logo_url },
-          away: { name: dbMatch.away_team?.name, logo: dbMatch.away_team?.logo_url }
+          home: { 
+            name: dbMatch.home_team?.name || 'Unknown', 
+            logo: dbMatch.home_team?.logo_url || '' 
+          },
+          away: { 
+            name: dbMatch.away_team?.name || 'Unknown', 
+            logo: dbMatch.away_team?.logo_url || '' 
+          }
         },
-        goals: { home: dbMatch.home_goals, away: dbMatch.away_goals },
+        goals: { home: homeGoals, away: awayGoals },
         stream_url: dbMatch.stream_url,
         auto_stream: autoStream
       };
     });
 
-    return { statusCode: 200, headers, body: JSON.stringify({ date: targetDate, matches: formattedMatches }) };
+    return { 
+        statusCode: 200, 
+        headers, 
+        body: JSON.stringify({ 
+            date: targetDate, 
+            matches: formattedMatches,
+            is_fast: isFastMode 
+        }) 
+    };
   } catch (err) {
     console.error('Handler Error:', err.message);
-    return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
+    return { 
+        statusCode: 500, 
+        headers, 
+        body: JSON.stringify({ error: err.message, matches: [] }) 
+    };
   }
 };
