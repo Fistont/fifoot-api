@@ -65,16 +65,12 @@ exports.handler = async function (event, context) {
       const dbHome = normalize(dbMatch.home_team?.name);
       const dbAway = normalize(dbMatch.away_team?.name);
 
-      // BULLETPROOF MATCHING: Only match football category and World Cup matches
+      // THE REAL FIX: Extract the correct SOURCE ID
       const streamGame = streamedPkMatches.find(g => {
-          // Only look at football matches
-          if (g.category !== 'football') return false;
-          
           const sHome = normalize(g.teams?.home?.name || "");
           const sAway = normalize(g.teams?.away?.name || "");
           const sTitle = normalize(g.title || "");
           
-          // Check if both teams match
           const homeMatch = sHome.includes(dbHome) || dbHome.includes(sHome) || sTitle.includes(dbHome);
           const awayMatch = sAway.includes(dbAway) || dbAway.includes(sAway) || sTitle.includes(dbAway);
           
@@ -83,11 +79,12 @@ exports.handler = async function (event, context) {
 
       let autoStream = null;
       if (streamGame && streamGame.sources && streamGame.sources.length > 0) {
-          // Prefer non-admin sources (they usually have better streams)
+          // WE MUST USE THE SOURCE ID, NOT THE MATCH ID
+          // The source ID is what the player API actually uses to load the stream
           const bestSource = streamGame.sources.find(s => s.source !== 'admin') || streamGame.sources[0];
           autoStream = {
               source: bestSource.source,
-              id: bestSource.id
+              id: bestSource.id // This is the correct ID (e.g., 'ppv-england-vs-india')
           };
       }
 
