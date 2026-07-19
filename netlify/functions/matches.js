@@ -55,17 +55,13 @@ exports.handler = async function (event, context) {
     const formattedMatches = (dbMatches || []).map((dbMatch) => {
       const normalize = (name) => {
           if (!name) return "";
-          let n = name.toLowerCase();
-          if (n.includes("ivory coast") || n.includes("cote d'ivoire")) return "ivory coast";
-          if (n.includes("dr congo") || n.includes("congo dr")) return "dr congo";
-          if (n.includes("usa") || n.includes("united states")) return "usa";
-          return n;
+          return name.toLowerCase().replace(/[^a-z0-9]/g, ''); // Remove all non-alphanumeric
       };
 
       const dbHome = normalize(dbMatch.home_team?.name);
       const dbAway = normalize(dbMatch.away_team?.name);
 
-      // ULTRA AGGRESSIVE MATCHING
+      // FUZZY MATCHING
       const streamGame = streamedPkMatches.find(g => {
           if (g.category !== 'football') return false;
           
@@ -73,11 +69,11 @@ exports.handler = async function (event, context) {
           const sAway = normalize(g.teams?.away?.name || "");
           const sTitle = normalize(g.title || "");
           
-          // Check if either team name is found in the title or team fields
-          const homeMatch = sHome.includes(dbHome) || dbHome.includes(sHome) || sTitle.includes(dbHome);
-          const awayMatch = sAway.includes(dbAway) || dbAway.includes(sAway) || sTitle.includes(dbAway);
+          // Check if both team names are found anywhere in the stream data
+          const homeFound = sHome.includes(dbHome) || dbHome.includes(sHome) || sTitle.includes(dbHome);
+          const awayFound = sAway.includes(dbAway) || dbAway.includes(sAway) || sTitle.includes(dbAway);
           
-          return homeMatch || awayMatch; // More aggressive: match if either team is found
+          return homeFound && awayFound;
       });
 
       let autoStream = null;
