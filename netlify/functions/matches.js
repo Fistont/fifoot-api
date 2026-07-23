@@ -1,4 +1,5 @@
 const { createClient } = require('@supabase/supabase-js');
+const cheerio = require('cheerio');
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
@@ -51,6 +52,8 @@ exports.handler = async function (event, context) {
     const isFastMode = params.fast === 'true';
     let liveData = [];
     let streamedPkMatches = [];
+            let streamFreeMatches = [];
+            let dlhdMatches = [];
 
     // Only fetch live data if NOT in fast mode
     if (!isFastMode) {
@@ -69,6 +72,42 @@ exports.handler = async function (event, context) {
             const streamResponse = await fetch('https://streamed.pk/api/matches/all-today', { signal: controller.signal });
             if (streamResponse.ok) {
                 streamedPkMatches = await streamResponse.json();
+            }
+
+            // NEW: Fetch Streams from streamfree.top
+            const streamFreeResponse = await fetch("https://streamfree.top/api/v1/streams?category=soccer", { signal: controller.signal });
+            if (streamFreeResponse.ok) {
+                const json = await streamFreeResponse.json();
+                streamFreeMatches = json.streams || [];
+            }
+
+            // NEW: Fetch Streams from dlhd.st
+            const dlhdResponse = await fetch("https://dlhd.st/index.php?cat=All+Soccer+Events+%E2%9A%BD", { signal: controller.signal });
+            if (dlhdResponse.ok) {
+                const html = await dlhdResponse.text();
+                const $ = cheerio.load(html);
+                $(".event-item").each((i, el) => {
+                    const time = $(el).find(".time").text().trim();
+                    const eventText = $(el).find(".event-name").text().trim();
+                    const streamLink = $(el).find(".channels a").attr("href");
+
+                    if (eventText && streamLink) {
+                        const matchRegex = /⚽\s*(.*?)\s*:\s*(.*?) vs (.*)/;
+                        const match = eventText.match(matchRegex);
+                        if (match) {
+                            const homeTeam = match[2].trim();
+                            const awayTeam = match[3].trim();
+                            const channelId = streamLink.split("id=")[1];
+                            if (channelId) {
+                                dlhdMatches.push({
+                                    home_team_name: homeTeam,
+                                    away_team_name: awayTeam,
+                                    channel_id: channelId
+                                });
+                            }
+                        }
+                    }
+                });
             }
 
             clearTimeout(timeoutId);
@@ -105,7 +144,7 @@ exports.handler = async function (event, context) {
       let elapsed = dbMatch.status_elapsed || '';
       let homeGoals = dbMatch.home_goals || 0;
       let awayGoals = dbMatch.away_goals || 0;
-      let autoStream = null;
+      let autoStreams = [];
 
       if (liveGame) {
           if (liveGame.finished === "TRUE") {
@@ -120,10 +159,39 @@ exports.handler = async function (event, context) {
 
       // NEW: Set Auto Stream Data
       if (streamGame && streamGame.sources && streamGame.sources.length > 0) {
-          autoStream = {
+          autoStreams.push({
+              service: 'streamed.pk',
               source: streamGame.sources[0].source,
               id: streamGame.sources[0].id
-          };
+          });
+      }
+
+      // NEW: Match for StreamFree.top
+      const streamFreeGame = streamFreeMatches.find(g => 
+        (normalize(g.name || "").includes(dbHome) || dbHome.includes(normalize(g.name || ""))) &&
+        (normalize(g.name || "").includes(dbAway) || dbAway.includes(normalize(g.name || "")))
+      );
+
+      if (streamFreeGame) {
+          autoStreams.push({
+              service: 'streamfree.top',
+              embedUrl: streamFreeGame.embed_url
+          });
+      }
+
+      // NEW: Match for dlhd.st
+      const dlhdGame = dlhdMatches.find(g => 
+        (normalize(g.home_team_name || "").includes(dbHome) || dbHome.includes(normalize(g.home_team_name || ""))) &&
+        (normalize(g.away_team_name || "").includes(dbAway) || dbAway.includes(normalize(g.away_team_name || "")))
+      );
+
+      if (dlhdGame) {
+          autoStreams.push({
+              service: 'dlhd.st',
+              id: dlhdGame.channel_id,
+              // For dlhd.st, we don't have a 'source' in the schedule, so we'll use a default or infer later
+              source: 'stream' // Default folder, can be changed in player if needed
+          });
       }
 
       return {
@@ -142,7 +210,7 @@ exports.handler = async function (event, context) {
         },
         goals: { home: homeGoals, away: awayGoals },
         stream_url: dbMatch.stream_url,
-        auto_stream: autoStream
+        auto_streams: autoStreams
       };
     });
 
